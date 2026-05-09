@@ -17,3 +17,8 @@ weights/*.onnx
 
 .DS_Store
 Thumbs.db
+
+*.docx
+*.pt
+*.pth
+*.onnx
