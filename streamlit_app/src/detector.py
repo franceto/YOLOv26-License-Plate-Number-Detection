@@ -59,7 +59,7 @@ def detect_image(img, conf, do_ocr=True):
 
     boxes = infer_boxes(model, img, conf, imgsz=960)
     boxes += tile_boxes(model, img, max(conf * 0.8, 0.15), tile=960, overlap=0.3)
-    boxes = nms_boxes(boxes, 0.45)
+    boxes = sorted(nms_boxes(boxes, 0.45), key=lambda x: x[4], reverse=True)
 
     out = img.copy()
     crops = []
