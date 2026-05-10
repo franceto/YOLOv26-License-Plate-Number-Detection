@@ -12,6 +12,10 @@ def clean_num(s):
     table = str.maketrans({"O":"0", "Q":"0", "D":"0", "I":"1", "L":"1", "Z":"2", "S":"5", "B":"8", "G":"6"})
     return s.translate(table)
 
+def fix_province(s):
+    table = str.maketrans({"O":"0", "Q":"0", "D":"0", "I":"1", "L":"1", "Z":"2", "S":"5", "B":"8", "G":"6"})
+    return s[:2].translate(table) + s[2:]
+
 def score_text(s):
     s = clean_text(s)
     return len(re.findall(r"\d", s)) * 4 + len(re.findall(r"[A-Z]", s)) * 3 + len(s)
@@ -25,15 +29,15 @@ def expand_cands(cands):
     return base + nums + extra
 
 def norm_top(raw):
-    s = clean_text(raw).replace(".", "-")
-    s = s.replace("O", "0").replace("Q", "0")
+    s0 = clean_text(raw)
+    if re.fullmatch(r"\d{4,}", re.sub(r"\D", "", s0)) and not re.search(r"[A-Z]", s0):
+        return None
+    s = fix_province(s0.replace(".", "-"))
     m = re.fullmatch(r"(\d{2})-?([A-Z0-9]{1,3})", s)
     if not m:
         return None
     prov, body = m.groups()
     if body.isdigit() and len(body) > 2:
-        return None
-    if s.isdigit() and len(s) >= 5:
         return None
     return f"{prov}-{body}"
 
@@ -66,7 +70,7 @@ def pick_best_top(cands, fallback):
 
     def rank(x):
         body = x.split("-")[-1]
-        return cnt[x] * 1000 + ("-" in x) * 100 + bool(re.search(r"[A-Z]", body)) * 80 + len(body) * 10
+        return cnt[x] * 1500 + ("-" in x) * 120 + bool(re.search(r"[A-Z]", body)) * 100 + len(body) * 10
 
     return sorted(set(normed), key=rank, reverse=True)[0]
 
@@ -87,7 +91,7 @@ def pick_best_bottom(cands, fallback):
 
     def rank(x):
         nums = re.sub(r"\D", "", x)
-        return cnt[x] * 1200 + len(nums) * 100 + ("." in x) * 30
+        return cnt[x] * 1500 + len(nums) * 100 + ("." in x) * 20
 
     return sorted(set(normed), key=rank, reverse=True)[0]
 
@@ -95,13 +99,14 @@ def pick_plate(top_cands, bottom_cands, all_cands):
     top = pick_best_top(top_cands, all_cands)
     bot = pick_best_bottom(bottom_cands, all_cands)
 
-    all_show = expand_cands(all_cands + top_cands + bottom_cands)
-    all_show = sorted(set([clean_text(x) for x in all_show if clean_text(x)]), key=score_text, reverse=True)
+    show = expand_cands(all_cands + top_cands + bottom_cands)
+    cnt = Counter([clean_text(x) for x in show if clean_text(x)])
+    show = sorted(set(cnt), key=lambda x: cnt[x] * 1000 + score_text(x), reverse=True)
 
     if top and bot:
-        return f"{top}\n{bot}", all_show[:15]
+        return f"{top}\n{bot}", show[:20]
     if bot:
-        return bot, all_show[:15]
+        return bot, show[:20]
     if top:
-        return top, all_show[:15]
-    return (all_show[0] if all_show else ""), all_show[:15]
+        return top, show[:20]
+    return (show[0] if show else ""), show[:20]
