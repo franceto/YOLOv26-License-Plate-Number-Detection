@@ -6,7 +6,7 @@ from PIL import Image
 
 from src.config import MODEL_PATH, IMAGE_TYPES, VIDEO_TYPES
 from src.detector import detect_image
-from src.image_utils import fmt_bytes, bgr2rgb
+from src.image_utils import fmt_bytes, bgr2rgb, fit_canvas
 from src.ui import inject_css, show_meta, show_compare, show_plates
 
 st.set_page_config(page_title="YOLOv26 Biển số OCR", layout="wide")
@@ -71,12 +71,32 @@ with tab2:
     conf_vid = st.slider("Con_f video", 0.1, 0.9, 0.35, 0.05, key="conf_vid")
     ocr_every = st.slider("OCR mỗi N frame", 1, 30, 10)
 
+    st.caption("Video gốc và video detect được hiển thị realtime song song. OCR chỉ chạy sau khi có bbox.")
+
+    c0, c1 = st.columns(2)
+    with c0:
+        st.subheader("Video gốc")
+        raw_box = st.empty()
+    with c1:
+        st.subheader("Video detect + bbox")
+        det_box = st.empty()
+
+    ocr_box = st.empty()
+
+    def show_frame(box, frame):
+        view = fit_canvas(frame, 760, 430)
+        box.image(bgr2rgb(view), width="stretch")
+
+    def update_ocr(texts):
+        if texts:
+            ocr_box.code("\n".join(sorted(set(texts))[-10:]))
+        else:
+            ocr_box.info("Chưa có kết quả OCR.")
+
     if mode == "Webcam realtime":
         cam_id = st.number_input("Camera ID", 0, 5, 0)
-        max_frames = st.slider("Số frame chạy", 30, 1000, 300, 30)
+        max_frames = st.slider("Số frame chạy", 30, 2000, 500, 30)
         start = st.button("Start realtime")
-        frame_box = st.empty()
-        text_box = st.empty()
 
         if start:
             cap = cv2.VideoCapture(int(cam_id))
@@ -87,21 +107,24 @@ with tab2:
                 if not ok:
                     break
 
-                out, crops = detect_image(frame, conf_vid, k % ocr_every == 0)
+                do_ocr = k % ocr_every == 0
+                out, crops = detect_image(frame, conf_vid, do_ocr)
 
-                for item in crops:
-                    if item["text"]:
-                        texts.append(item["text"])
+                if do_ocr:
+                    for item in crops:
+                        if item["text"]:
+                            texts.append(item["text"])
 
-                frame_box.image(bgr2rgb(out), width="stretch")
-                text_box.write(sorted(set(texts))[-10:])
+                show_frame(raw_box, frame)
+                show_frame(det_box, out)
+                update_ocr(texts)
                 time.sleep(0.01)
 
             cap.release()
 
     else:
         vid_file = st.file_uploader("Upload video", type=VIDEO_TYPES, key="vid_file")
-        run = st.button("Detect video")
+        run = st.button("Detect video realtime")
 
         if vid_file and run:
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=Path(vid_file.name).suffix)
@@ -123,21 +146,27 @@ with tab2:
                 if not ok:
                     break
 
-                out, crops = detect_image(frame, conf_vid, k % ocr_every == 0)
+                do_ocr = k % ocr_every == 0
+                out, crops = detect_image(frame, conf_vid, do_ocr)
 
-                for item in crops:
-                    if item["text"]:
-                        texts.append(item["text"])
+                if do_ocr:
+                    for item in crops:
+                        if item["text"]:
+                            texts.append(item["text"])
 
                 writer.write(out)
-                k += 1
+                show_frame(raw_box, frame)
+                show_frame(det_box, out)
+                update_ocr(texts)
 
+                k += 1
                 if total:
                     prog.progress(min(k / total, 1.0))
 
             cap.release()
             writer.release()
 
+            st.subheader("Video kết quả sau xử lý")
             st.video(out_path)
-            st.subheader("Kết quả OCR")
-            st.write(sorted(set(texts)))
+            st.subheader("Kết quả OCR cuối")
+            st.code("\n".join(sorted(set(texts))) if texts else "Không đọc được biển số.")
