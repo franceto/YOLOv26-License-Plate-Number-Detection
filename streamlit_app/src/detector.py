@@ -117,7 +117,8 @@ def detect_frame_fast(img, conf, imgsz=512):
             "raw": raw,
             "text": "",
             "score": score,
-            "cands": []
+            "cands": [],
+            "box": box
         })
 
         px1, py1, px2, py2 = box

@@ -9,4 +9,4 @@ tqdm
 Pillow
 streamlit
 easyocr
-moviepy
+moviepyrapidocr-onnxruntime
