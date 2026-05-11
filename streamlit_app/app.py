@@ -5,7 +5,9 @@ from pathlib import Path
 from PIL import Image
 
 from src.config import MODEL_PATH, IMAGE_TYPES, VIDEO_TYPES
-from src.detector import detect_image
+from src.detector import detect_image, detect_frame_fast
+from src.loaders import load_ocr
+from src.ocr_engine import recognize_plate
 from src.image_utils import fmt_bytes, bgr2rgb, fit_canvas
 from src.ui import inject_css, show_meta, show_compare, show_plates
 
@@ -69,29 +71,35 @@ with tab2:
 
     mode = st.radio("Nguồn video", ["Webcam realtime", "Upload video"], horizontal=True)
     conf_vid = st.slider("Con_f video", 0.1, 0.9, 0.35, 0.05, key="conf_vid")
-    ocr_every = st.slider("OCR mỗi N frame", 1, 30, 10)
+    video_imgsz = st.select_slider("Kích thước inference", options=[512, 640, 768, 960], value=640)
+    display_every = st.slider("Hiển thị mỗi N frame", 1, 5, 2)
+    max_ocr_crops = st.slider("Số crop OCR sau khi detect xong", 5, 100, 30, 5)
 
-    st.caption("Video gốc và video detect được hiển thị realtime song song. OCR chỉ chạy sau khi có bbox.")
-
-    c0, c1 = st.columns(2)
-    with c0:
+    c1, c2 = st.columns(2)
+    with c1:
         st.subheader("Video gốc")
         raw_box = st.empty()
-    with c1:
-        st.subheader("Video detect + bbox")
+    with c2:
+        st.subheader("Detect trên video gốc")
         det_box = st.empty()
 
+    stat_box = st.empty()
     ocr_box = st.empty()
 
     def show_frame(box, frame):
         view = fit_canvas(frame, 760, 430)
         box.image(bgr2rgb(view), width="stretch")
 
-    def update_ocr(texts):
-        if texts:
-            ocr_box.code("\n".join(sorted(set(texts))[-10:]))
-        else:
-            ocr_box.info("Chưa có kết quả OCR.")
+    def run_ocr_after_video(items):
+        ocr = load_ocr()
+        rows = []
+        items = sorted(items, key=lambda x: x["score"], reverse=True)[:max_ocr_crops]
+
+        for i, item in enumerate(items):
+            text, cands = recognize_plate(item["raw"], item["crop"], ocr)
+            rows.append({"crop": item["crop"], "text": text, "score": item["score"], "cands": cands})
+
+        return rows
 
     if mode == "Webcam realtime":
         cam_id = st.number_input("Camera ID", 0, 5, 0)
@@ -100,27 +108,42 @@ with tab2:
 
         if start:
             cap = cv2.VideoCapture(int(cam_id))
-            texts = []
+            all_crops, total_bbox, k = [], 0, 0
 
-            for k in range(max_frames):
+            while k < max_frames:
                 ok, frame = cap.read()
                 if not ok:
                     break
 
-                do_ocr = k % ocr_every == 0
-                out, crops = detect_image(frame, conf_vid, do_ocr)
+                out, crops = detect_image(frame, conf_vid, False, use_tiles=False, imgsz=video_imgsz)
+                all_crops += crops
+                total_bbox += len(crops)
 
-                if do_ocr:
-                    for item in crops:
-                        if item["text"]:
-                            texts.append(item["text"])
+                if k % display_every == 0:
+                    show_frame(raw_box, frame)
+                    show_frame(det_box, out)
+                    stat_box.info(f"Frame: {k+1} | Tổng bbox đã detect: {total_bbox}")
 
-                show_frame(raw_box, frame)
-                show_frame(det_box, out)
-                update_ocr(texts)
-                time.sleep(0.01)
+                k += 1
+                time.sleep(0.001)
 
             cap.release()
+
+            stat_box.success(f"Detect xong: {k} frame | Tổng bbox: {total_bbox}")
+            ocr_box.info("Đang OCR các crop tốt nhất...")
+
+            rows = run_ocr_after_video(all_crops)
+
+            st.subheader("Kết quả OCR sau khi detect xong")
+            if not rows:
+                st.warning("Không có bbox để OCR.")
+            else:
+                cols = st.columns(min(len(rows), 5))
+                for i, item in enumerate(rows):
+                    with cols[i % len(cols)]:
+                        st.image(bgr2rgb(fit_canvas(item["crop"], 320, 180)), caption=f"Crop {i+1} | conf={item['score']:.2f}", width="stretch")
+                        st.code(item["text"] if item["text"] else "Không đọc được")
+                        st.write(item["cands"])
 
     else:
         vid_file = st.file_uploader("Upload video", type=VIDEO_TYPES, key="vid_file")
@@ -131,42 +154,42 @@ with tab2:
             tmp.write(vid_file.read())
 
             cap = cv2.VideoCapture(tmp.name)
-            w, h = int(cap.get(3)), int(cap.get(4))
-            fps = cap.get(cv2.CAP_PROP_FPS) or 25
             total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-            out_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
-            writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-
+            all_crops, total_bbox, k = [], 0, 0
             prog = st.progress(0)
-            texts, k = [], 0
 
             while True:
                 ok, frame = cap.read()
                 if not ok:
                     break
 
-                do_ocr = k % ocr_every == 0
-                out, crops = detect_image(frame, conf_vid, do_ocr)
+                out, crops = detect_image(frame, conf_vid, False, use_tiles=False, imgsz=video_imgsz)
+                all_crops += crops
+                total_bbox += len(crops)
 
-                if do_ocr:
-                    for item in crops:
-                        if item["text"]:
-                            texts.append(item["text"])
-
-                writer.write(out)
-                show_frame(raw_box, frame)
-                show_frame(det_box, out)
-                update_ocr(texts)
+                if k % display_every == 0:
+                    show_frame(raw_box, frame)
+                    show_frame(det_box, out)
+                    stat_box.info(f"Frame: {k+1}/{total} | Tổng bbox đã detect: {total_bbox}")
 
                 k += 1
                 if total:
                     prog.progress(min(k / total, 1.0))
 
             cap.release()
-            writer.release()
 
-            st.subheader("Video kết quả sau xử lý")
-            st.video(out_path)
-            st.subheader("Kết quả OCR cuối")
-            st.code("\n".join(sorted(set(texts))) if texts else "Không đọc được biển số.")
+            stat_box.success(f"Detect xong: {k} frame | Tổng bbox: {total_bbox}")
+            ocr_box.info("Đang OCR các crop tốt nhất...")
+
+            rows = run_ocr_after_video(all_crops)
+
+            st.subheader("Kết quả OCR sau khi detect xong")
+            if not rows:
+                st.warning("Không có bbox để OCR.")
+            else:
+                cols = st.columns(min(len(rows), 5))
+                for i, item in enumerate(rows):
+                    with cols[i % len(cols)]:
+                        st.image(bgr2rgb(fit_canvas(item["crop"], 320, 180)), caption=f"Crop {i+1} | conf={item['score']:.2f}", width="stretch")
+                        st.code(item["text"] if item["text"] else "Không đọc được")
+                        st.write(item["cands"])
