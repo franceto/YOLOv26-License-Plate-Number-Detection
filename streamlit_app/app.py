@@ -67,6 +67,107 @@ with tab1:
             show_plates(st.session_state["crops"])
 
 with tab2:
+    st.header("Detect video")
+
+    conf_vid = st.slider("Con_f video", 0.1, 0.9, 0.35, 0.05, key="conf_vid")
+    video_imgsz = st.select_slider("Kích thước inference", options=[416, 512, 640, 768], value=512)
+    vid_stride = st.slider("Detect mỗi N frame", 1, 5, 1)
+    top_k = st.slider("Số bbox tốt nhất để OCR", 1, 10, 3)
+
+    vid_file = st.file_uploader("Upload video", type=VIDEO_TYPES, key="vid_file")
+
+    def crop_quality(item):
+        crop = item["crop"]
+        if crop is None or crop.size == 0:
+            return 0
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        sharp = cv2.Laplacian(gray, cv2.CV_64F).var()
+        h, w = crop.shape[:2]
+        area = h * w
+        return item["score"] * 100000 + min(sharp, 2000) * 10 + min(area, 50000) * 0.01
+
+    def update_top(items, crops, k):
+        items += crops
+        items = sorted(items, key=crop_quality, reverse=True)
+        return items[:k]
+
+    def ocr_best_crops(items):
+        ocr = load_ocr()
+        rows = []
+        for item in items:
+            text, cands = recognize_plate(item["raw"], item["crop"], ocr)
+            item["text"] = text
+            item["cands"] = cands
+            rows.append(item)
+        return rows
+
+    if vid_file:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=Path(vid_file.name).suffix)
+        tmp.write(vid_file.read())
+
+        st.subheader("Video gốc")
+        st.video(tmp.name)
+
+        run = st.button("Detect toàn bộ video")
+
+        if run:
+            cap = cv2.VideoCapture(tmp.name)
+
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+            out_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+            writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+
+            prog = st.progress(0)
+            stat = st.empty()
+
+            top_items, total_bbox, frame_idx = [], 0, 0
+            last_out = None
+
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+
+                if frame_idx % vid_stride == 0:
+                    out, crops = detect_frame_fast(frame, conf_vid, imgsz=video_imgsz)
+                    top_items = update_top(top_items, crops, top_k)
+                    total_bbox += len(crops)
+                    last_out = out
+                else:
+                    out = last_out if last_out is not None else frame
+
+                writer.write(out)
+
+                frame_idx += 1
+                if total:
+                    prog.progress(min(frame_idx / total, 1.0))
+                stat.info(f"Đang xử lý: {frame_idx}/{total} frame | Tổng bbox: {total_bbox} | Top giữ lại: {len(top_items)}")
+
+            cap.release()
+            writer.release()
+
+            stat.success(f"Detect xong: {frame_idx} frame | Tổng bbox: {total_bbox}")
+
+            st.subheader("Video detect")
+            st.video(out_path)
+
+            st.subheader(f"OCR top {len(top_items)} bbox tốt nhất")
+            with st.spinner("Đang OCR top bbox tốt nhất..."):
+                rows = ocr_best_crops(top_items)
+
+            if not rows:
+                st.warning("Không có bbox để OCR.")
+            else:
+                cols = st.columns(len(rows))
+                for i, item in enumerate(rows):
+                    with cols[i]:
+                        st.image(bgr2rgb(fit_canvas(item["crop"], 320, 180)), caption=f"Top {i+1} | conf={item['score']:.2f}", width="stretch")
+                        st.code(item["text"] if item["text"] else "Không đọc được")
+                        st.write(item["cands"])
     st.header("Detect video realtime")
 
     mode = st.radio("Nguồn video", ["Webcam realtime", "Upload video"], horizontal=True)
