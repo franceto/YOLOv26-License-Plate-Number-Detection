@@ -70,3 +70,58 @@ def detect_image(img, conf, do_ocr=True, use_tiles=True, imgsz=960):
         cv2.putText(out, f"Bien-so {score:.2f}", (px1, max(25, py1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
     return out, crops
+def detect_frame_fast(img, conf, imgsz=640):
+    model = load_model()
+    boxes = infer_boxes(model, img, conf, imgsz=imgsz)
+    boxes = sorted(nms_boxes(boxes, 0.45), key=lambda x: x[4], reverse=True)
+
+    out = img.copy()
+    crops = []
+    H, W = img.shape[:2]
+
+    for x1, y1, x2, y2, score in boxes:
+        x1, y1, x2, y2 = max(0, x1), max(0, y1), min(W, x2), min(H, y2)
+        raw = img[y1:y2, x1:x2]
+        pad, box = safe_crop(img, x1, y1, x2, y2, 0.08)
+
+        crops.append({
+            "crop": pad,
+            "raw": raw,
+            "text": "",
+            "score": score,
+            "cands": [],
+            "box": box
+        })
+
+        px1, py1, px2, py2 = box
+        cv2.rectangle(out, (px1, py1), (px2, py2), (0, 255, 0), 2)
+        cv2.putText(out, f"Bien-so {score:.2f}", (px1, max(25, py1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+    return out, crops
+def detect_frame_fast(img, conf, imgsz=512):
+    model = load_model()
+    boxes = infer_boxes(model, img, conf, imgsz=imgsz)
+    boxes = sorted(nms_boxes(boxes, 0.45), key=lambda x: x[4], reverse=True)
+
+    out = img.copy()
+    crops = []
+    H, W = img.shape[:2]
+
+    for x1, y1, x2, y2, score in boxes:
+        x1, y1, x2, y2 = max(0, x1), max(0, y1), min(W, x2), min(H, y2)
+        raw = img[y1:y2, x1:x2]
+        pad, box = safe_crop(img, x1, y1, x2, y2, 0.08)
+
+        crops.append({
+            "crop": pad,
+            "raw": raw,
+            "text": "",
+            "score": score,
+            "cands": []
+        })
+
+        px1, py1, px2, py2 = box
+        cv2.rectangle(out, (px1, py1), (px2, py2), (0, 255, 0), 2)
+        cv2.putText(out, f"Bien-so {score:.2f}", (px1, max(25, py1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+    return out, crops
