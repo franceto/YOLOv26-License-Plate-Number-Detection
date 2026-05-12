@@ -1,4 +1,4 @@
-import sys, base64, uuid
+import sys, base64, uuid, hashlib
 from pathlib import Path
 from functools import lru_cache
 from typing import Dict, List
@@ -12,8 +12,7 @@ from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT))
-
-from streamlit_app.src.ocr_engine import recognize_plate
+from streamlit_app.src.ocr_engine import recognize_plate_fast
 
 WEIGHT_DIR = ROOT / "weights"
 MODEL_PATH = next(WEIGHT_DIR.glob("*best.pt"), None)
@@ -22,7 +21,7 @@ app = FastAPI(title="YOLOv26 License Plate FastAPI")
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 TOPS: Dict[str, List[dict]] = {}
-
+OCR_CACHE = {}
 class FrameReq(BaseModel):
     image: str
     conf: float = 0.35
@@ -153,6 +152,27 @@ def valid_plate_box(img, x1, y1, x2, y2, score):
         return False
 
     return True
+def crop_hash(img):
+    if img is None or img.size == 0:
+        return ""
+    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+    if not ok:
+        return ""
+    return hashlib.md5(buf.tobytes()).hexdigest()
+
+def ocr_cached(raw, crop, ocr):
+    key = crop_hash(crop)
+
+    if key in OCR_CACHE:
+        return OCR_CACHE[key]
+
+    text, cands = recognize_plate_fast(raw, crop, ocr)
+    OCR_CACHE[key] = (text, cands)
+
+    if len(OCR_CACHE) > 300:
+        OCR_CACHE.clear()
+
+    return text, cands
 @app.get("/")
 def index():
     return FileResponse(Path(__file__).parent / "static" / "index.html")
@@ -221,7 +241,7 @@ def ocr_top(req: OcrReq):
     rows = []
 
     for i, item in enumerate(items):
-        text, cands = recognize_plate(item["raw"], item["crop"], ocr)
+        text, cands = ocr_cached(item["raw"], item["crop"], ocr)
         rows.append({
             "rank": i + 1,
             "score": round(float(item["score"]), 4),

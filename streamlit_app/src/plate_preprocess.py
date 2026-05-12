@@ -120,3 +120,25 @@ def split_lines(img):
     h = x.shape[0]
     gap = int(h * 0.05)
     return [x[:h//2+gap], x[h//2-gap:]]
+def make_variants_video(raw_crop, pad_crop):
+    imgs = []
+    base = pad_crop if pad_crop is not None and pad_crop.size else raw_crop
+
+    if base is None or base.size == 0:
+        return []
+
+    x = add_border(resize_h(base, 260), 0.08)
+    l = low_light(x)
+    s = sharpen(l)
+    d = deblur(l)
+
+    imgs += [
+        ("video_light", l),
+        ("video_sharp", s),
+        ("video_deblur", d),
+    ]
+
+    if base.shape[0] < 80:
+        imgs.append(("video_sr2", sr2(l)))
+
+    return imgs
