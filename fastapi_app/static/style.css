@@ -4,164 +4,90 @@
 
 body {
     margin: 0;
-    font-family: Inter, Segoe UI, Arial, sans-serif;
-    background: linear-gradient(135deg, #f8fafc, #eef2ff);
-    color: #111827;
+    background: #f2f4f8;
+    color: #0f172a;
+    font-family: Arial, sans-serif;
 }
 
 .app {
-    max-width: 1200px;
-    margin: 0 auto;
-    padding: 24px;
-}
-
-.hero {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 18px;
-}
-
-.hero h1 {
-    margin: 0;
-    font-size: 34px;
-    font-weight: 850;
-    letter-spacing: -0.7px;
-}
-
-.hero p {
-    margin: 6px 0 0;
-    color: #64748b;
-}
-
-.badge {
-    background: linear-gradient(135deg, #2563eb, #4f46e5);
-    color: white;
-    padding: 10px 16px;
-    border-radius: 999px;
-    font-weight: 750;
-    box-shadow: 0 10px 25px rgba(37, 99, 235, 0.25);
+    width: min(1180px, 96vw);
+    margin: 24px auto;
 }
 
 .panel {
-    background: rgba(255,255,255,0.92);
-    border: 1px solid #e5e7eb;
-    border-radius: 22px;
-    padding: 16px;
-    box-shadow: 0 12px 30px rgba(15,23,42,0.08);
+    background: white;
+    border-radius: 18px;
+    padding: 20px;
     margin-bottom: 18px;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+}
+
+.topPanel {
+    padding-bottom: 16px;
 }
 
 .controls {
     display: grid;
-    grid-template-columns: 1.4fr 1.8fr 1fr auto auto auto;
-    gap: 12px;
-    align-items: center;
+    grid-template-columns: 1fr 1.3fr 0.7fr 0.7fr;
+    gap: 14px;
+}
+
+button,
+.upload {
+    height: 56px;
+    border: 0;
+    border-radius: 16px;
+    background: linear-gradient(90deg, #2563eb, #4f46e5);
+    color: white;
+    font-weight: 800;
+    font-size: 16px;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+}
+
+#stopBtn {
+    background: linear-gradient(90deg, #ef4444, #f97316);
+}
+
+button:disabled {
+    background: #94a3b8;
+    cursor: not-allowed;
 }
 
 .upload {
-    height: 44px;
-    border: 1.5px dashed #60a5fa;
-    border-radius: 14px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    border: 1px dashed #60a5fa;
+    background: white;
     color: #2563eb;
-    font-weight: 800;
-    background: #eff6ff;
-    cursor: pointer;
 }
 
 .upload input {
     display: none;
 }
 
-.field {
+.statusBox {
+    margin-top: 10px;
+    font-size: 18px;
+    line-height: 1.5;
+}
+
+h1 {
+    margin: 0 0 18px;
+    font-size: 28px;
+}
+
+.videoOuter {
     display: flex;
-    align-items: center;
-    gap: 8px;
-    background: #f8fafc;
-    border: 1px solid #e5e7eb;
-    padding: 8px 10px;
-    border-radius: 14px;
-    font-weight: 700;
-}
-
-.field span {
-    color: #475569;
-    font-size: 14px;
-}
-
-.field input {
-    width: 150px;
-}
-
-select {
-    border: none;
-    background: transparent;
-    font-weight: 800;
-    outline: none;
-}
-
-button {
-    height: 44px;
-    border: none;
-    border-radius: 14px;
-    padding: 0 16px;
-    background: linear-gradient(135deg, #2563eb, #4f46e5);
-    color: white;
-    font-weight: 850;
-    cursor: pointer;
-    box-shadow: 0 10px 22px rgba(37, 99, 235, 0.22);
-}
-
-button:hover {
-    transform: translateY(-1px);
-}
-
-#stopBtn {
-    background: linear-gradient(135deg, #ef4444, #f97316);
-}
-
-#ocrBtn {
-    background: linear-gradient(135deg, #059669, #10b981);
-}
-
-.status {
-    margin-top: 14px;
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 10px;
-}
-
-.status div {
-    background: #f8fafc;
-    border: 1px solid #e5e7eb;
-    border-radius: 14px;
-    padding: 10px 12px;
-    color: #475569;
-}
-
-.status b {
-    color: #111827;
-}
-
-.video-card {
-    background: white;
-    border: 1px solid #e5e7eb;
-    border-radius: 24px;
-    padding: 14px;
-    box-shadow: 0 14px 34px rgba(15,23,42,0.10);
-}
-
-.video-wrap {
-    position: relative;
-    width: fit-content;
-    max-width: 100%;
-    margin: 0 auto;
-    background: #020617;
-    border-radius: 18px;
+    justify-content: center;
+    width: 100%;
     overflow: hidden;
+}
+
+.videoWrap {
+    position: relative;
+    display: inline-block;
+    max-width: 100%;
+    line-height: 0;
 }
 
 video {
@@ -170,95 +96,54 @@ video {
     height: auto;
     max-width: 100%;
     max-height: 560px;
-    object-fit: contain;
     background: black;
+    border-radius: 4px;
 }
 
 canvas#overlay {
     position: absolute;
-    left: 0;
-    top: 0;
+    inset: 0;
     pointer-events: none;
+    z-index: 5;
 }
 
 .results {
-    margin-top: 18px;
-    background: rgba(255,255,255,0.92);
-    border: 1px solid #e5e7eb;
-    border-radius: 22px;
-    padding: 16px;
-    box-shadow: 0 12px 30px rgba(15,23,42,0.08);
-}
-
-.results h2 {
-    margin-top: 0;
-}
-
-.ocr-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
     gap: 14px;
 }
 
-.ocr-card {
+.resultCard {
     border: 1px solid #e5e7eb;
-    border-radius: 18px;
+    border-radius: 14px;
     padding: 12px;
-    background: #f8fafc;
+    background: #fafafa;
 }
 
-.ocr-card img {
+.resultCard img {
     width: 100%;
-    border-radius: 12px;
-    background: white;
+    height: 120px;
+    object-fit: contain;
+    background: #111827;
+    border-radius: 10px;
 }
 
-.plate-text {
-    margin: 10px 0;
-    padding: 14px;
-    border-radius: 12px;
-    background: #0f172a;
-    color: #67e8f9;
+.plateText {
+    margin-top: 10px;
     font-size: 22px;
     font-weight: 900;
-    text-align: center;
     white-space: pre-line;
+    line-height: 1.25;
 }
 
-.cands {
+.meta {
+    margin-top: 6px;
     font-size: 13px;
-    color: #475569;
-    word-break: break-word;
+    color: #64748b;
 }
 
-@media (max-width: 950px) {
+@media (max-width: 850px) {
     .controls {
         grid-template-columns: 1fr;
     }
-
-    .status {
-        grid-template-columns: 1fr 1fr;
-    }
-
-    .ocr-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .hero {
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 12px;
-    }
-}
-.upload-box {
-    background: #eff6ff;
-    border: 1.5px dashed #60a5fa;
-    border-radius: 14px;
-    padding: 10px;
-}
-
-.upload-box input {
-    width: 100%;
-    font-weight: 700;
-    color: #2563eb;
 }

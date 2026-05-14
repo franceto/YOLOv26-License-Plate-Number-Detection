@@ -1,294 +1,285 @@
-const video = document.getElementById("video");
 const videoInput = document.getElementById("videoInput");
-const overlay = document.getElementById("overlay");
-const sendCanvas = document.getElementById("sendCanvas");
-
-const ctx = overlay.getContext("2d");
-const sendCtx = sendCanvas.getContext("2d");
-
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
-const ocrBtn = document.getElementById("ocrBtn");
+const finishBtn = document.getElementById("finishBtn");
+const statusText = document.getElementById("statusText");
+const totalText = document.getElementById("totalText");
+const video = document.getElementById("video");
+const overlay = document.getElementById("overlay");
+const ctx = overlay.getContext("2d");
+const resultsBox = document.getElementById("results");
 
-const conf = document.getElementById("conf");
-const confVal = document.getElementById("confVal");
-const imgsz = document.getElementById("imgsz");
-
-const statusEl = document.getElementById("status");
-const latencyEl = document.getElementById("latency");
-const topCountEl = document.getElementById("topCount");
-const delayEl = document.getElementById("delay");
-const ocrResults = document.getElementById("ocrResults");
-
+let sessionId = null;
 let running = false;
 let busy = false;
-let sessionId = crypto.randomUUID();
 let lastSent = 0;
-let autoDelay = 160;
+let autoDelay = 130;
 let lastBoxes = [];
+let lastFrameW = 1;
+let lastFrameH = 1;
 
-conf.addEventListener("input", () => {
-    confVal.textContent = Number(conf.value).toFixed(2);
-});
+const captureCanvas = document.createElement("canvas");
+const captureCtx = captureCanvas.getContext("2d");
 
-function setStatus(text) {
-    statusEl.textContent = text;
-}
-
-function clearOverlay() {
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
+async function createSession() {
+    const res = await fetch("/api/new_session");
+    const data = await res.json();
+    sessionId = data.session_id;
 }
 
 function resizeOverlay() {
-    if (!video.videoWidth || !video.videoHeight) return;
-
     const rect = video.getBoundingClientRect();
-
-    overlay.width = video.videoWidth;
-    overlay.height = video.videoHeight;
+    const dpr = window.devicePixelRatio || 1;
 
     overlay.style.width = `${rect.width}px`;
     overlay.style.height = `${rect.height}px`;
 
-    clearOverlay();
+    overlay.width = Math.round(rect.width * dpr);
+    overlay.height = Math.round(rect.height * dpr);
 
-    if (lastBoxes.length > 0) {
-        drawBoxes(lastBoxes, video.videoWidth, video.videoHeight);
-    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 
-function drawBoxes(boxes, frameW, frameH) {
-    clearOverlay();
+function drawBoxes() {
+    resizeOverlay();
 
-    if (!frameW || !frameH) return;
+    const rect = video.getBoundingClientRect();
+    ctx.clearRect(0, 0, rect.width, rect.height);
 
-    const sx = overlay.width / frameW;
-    const sy = overlay.height / frameH;
+    const sx = rect.width / lastFrameW;
+    const sy = rect.height / lastFrameH;
 
-    ctx.lineWidth = Math.max(2, overlay.width / 500);
-    ctx.font = `${Math.max(16, overlay.width / 60)}px Arial`;
-    ctx.textBaseline = "top";
+    for (const item of lastBoxes) {
+        const [x1, y1, x2, y2] = item.box;
 
-    boxes.forEach(b => {
-        const x = b.x1 * sx;
-        const y = b.y1 * sy;
-        const w = (b.x2 - b.x1) * sx;
-        const h = (b.y2 - b.y1) * sy;
+        const rx = x1 * sx;
+        const ry = y1 * sy;
+        const rw = (x2 - x1) * sx;
+        const rh = (y2 - y1) * sy;
 
-        if (w < 8 || h < 8) return;
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "#00ff66";
+        ctx.strokeRect(rx, ry, rw, rh);
 
-        ctx.strokeStyle = "#22c55e";
-        ctx.fillStyle = "#22c55e";
-
-        ctx.strokeRect(x, y, w, h);
-
-        const label = `${b.label} ${Number(b.score).toFixed(2)}`;
+        const label = `ID ${item.track_id} | ${Number(item.conf).toFixed(2)}`;
+        ctx.font = "16px Arial";
         const tw = ctx.measureText(label).width + 12;
-        const th = Math.max(22, overlay.width / 45);
 
-        ctx.fillRect(x, Math.max(0, y - th), tw, th);
-        ctx.fillStyle = "#020617";
-        ctx.fillText(label, x + 6, Math.max(0, y - th) + 3);
-    });
+        ctx.fillStyle = "#00ff66";
+        ctx.fillRect(rx, Math.max(0, ry - 26), tw, 24);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.fillText(label, rx + 6, Math.max(17, ry - 8));
+    }
+
+    requestAnimationFrame(drawBoxes);
 }
 
-function captureFrame(maxSide = 1280) {
+function captureFrame() {
     const vw = video.videoWidth;
     const vh = video.videoHeight;
 
-    let w = vw;
-    let h = vh;
+    if (!vw || !vh) return null;
 
-    if (Math.max(w, h) > maxSide) {
-        const s = maxSide / Math.max(w, h);
-        w = Math.round(w * s);
-        h = Math.round(h * s);
+    const maxSide = 960;
+    let sw = vw;
+    let sh = vh;
+
+    if (Math.max(vw, vh) > maxSide) {
+        const scale = maxSide / Math.max(vw, vh);
+        sw = Math.round(vw * scale);
+        sh = Math.round(vh * scale);
     }
 
-    sendCanvas.width = w;
-    sendCanvas.height = h;
-    sendCtx.drawImage(video, 0, 0, w, h);
+    captureCanvas.width = sw;
+    captureCanvas.height = sh;
+    captureCtx.drawImage(video, 0, 0, sw, sh);
 
-    return sendCanvas.toDataURL("image/jpeg", 0.82);
+    return captureCanvas.toDataURL("image/jpeg", 0.82);
 }
 
-videoInput.addEventListener("change", async (e) => {
-    const file = e.target.files[0];
+async function detectLoop(now) {
+    if (!running) return;
 
-    if (!file) {
-        setStatus("Chưa chọn video");
+    if (!video.paused && !video.ended && !busy && now - lastSent >= autoDelay) {
+        const image = captureFrame();
+
+        if (image) {
+            busy = true;
+            lastSent = now;
+
+            const t0 = performance.now();
+
+            try {
+                const res = await fetch("/api/detect_frame", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        session_id: sessionId,
+                        image: image,
+                        conf: 0.18,
+                        imgsz: 640
+                    })
+                });
+
+                const data = await res.json();
+
+                lastBoxes = data.boxes || [];
+                lastFrameW = data.frame_w || 1;
+                lastFrameH = data.frame_h || 1;
+                totalText.textContent = data.total_tracks || 0;
+
+                const latency = performance.now() - t0;
+                autoDelay = Math.max(120, Math.min(360, latency * 1.2));
+
+                statusText.textContent = `Đang detect realtime | bbox hiện tại: ${lastBoxes.length}`;
+            } catch (err) {
+                statusText.textContent = "Lỗi detect frame";
+            }
+
+            busy = false;
+        }
+    }
+
+    requestAnimationFrame(detectLoop);
+}
+
+function renderResults(items) {
+    resultsBox.innerHTML = "";
+
+    if (!items.length) {
+        resultsBox.innerHTML = "<p>Chưa có kết quả OCR.</p>";
         return;
     }
+
+    for (const item of items) {
+        const card = document.createElement("div");
+        card.className = "resultCard";
+
+        const img = document.createElement("img");
+        img.src = item.image;
+        img.alt = "plate crop";
+
+        const text = document.createElement("div");
+        text.className = "plateText";
+        text.textContent = item.text || "OCR chưa đọc rõ";
+
+        const meta1 = document.createElement("div");
+        meta1.className = "meta";
+        meta1.textContent = `Track ID: ${item.track_id}`;
+
+        const meta2 = document.createElement("div");
+        meta2.className = "meta";
+        meta2.textContent = `Số frame thấy biển: ${item.hits}`;
+
+        const meta3 = document.createElement("div");
+        meta3.className = "meta";
+        meta3.textContent = `Conf: ${item.conf} | Quality: ${item.quality}`;
+
+        card.appendChild(img);
+        card.appendChild(text);
+        card.appendChild(meta1);
+        card.appendChild(meta2);
+        card.appendChild(meta3);
+
+        resultsBox.appendChild(card);
+    }
+}
+
+async function finishOcr() {
+    if (!sessionId) return;
+
+    statusText.textContent = "Đang OCR crop tốt nhất...";
+
+    const res = await fetch("/api/ocr_best", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            session_id: sessionId
+        })
+    });
+
+    const data = await res.json();
+
+    totalText.textContent = data.total || 0;
+    renderResults(data.results || []);
+    statusText.textContent = `Hoàn tất. Lấy ${data.total || 0} biển số tốt nhất, không trùng lặp.`;
+}
+
+videoInput.addEventListener("change", async () => {
+    const file = videoInput.files[0];
+    if (!file) return;
+
+    await createSession();
+
+    video.src = URL.createObjectURL(file);
+    video.load();
 
     running = false;
     busy = false;
     lastBoxes = [];
-    sessionId = crypto.randomUUID();
-    ocrResults.innerHTML = "";
-    clearOverlay();
+    totalText.textContent = "0";
+    statusText.textContent = "Đã tải video. Bấm Bắt đầu để phát và detect realtime.";
+    resultsBox.innerHTML = "<p>Chưa có kết quả OCR.</p>";
 
-    const url = URL.createObjectURL(file);
-    video.src = url;
-    video.load();
-
-    video.onloadedmetadata = async () => {
-        resizeOverlay();
-
-        await fetch("/reset", {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({session_id: sessionId})
-        });
-
-        setStatus(`Đã tải: ${file.name} | ${video.videoWidth}x${video.videoHeight}`);
-    };
-
-    video.onerror = () => {
-        setStatus("Video không phát được. Hãy dùng MP4 H.264 hoặc WebM.");
-        alert("Trình duyệt không đọc được video này. Hãy đổi sang MP4 H.264.");
-    };
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    finishBtn.disabled = false;
 });
 
-async function detectOnce() {
-    if (!running || busy || video.paused || video.ended || video.readyState < 2) return;
-
-    const now = performance.now();
-    if (now - lastSent < autoDelay) return;
-
-    busy = true;
-    lastSent = now;
-
-    try {
-        const img = captureFrame(1280);
-        const t0 = performance.now();
-
-        const res = await fetch("/detect_frame", {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({
-                image: img,
-                conf: Number(conf.value),
-                imgsz: Number(imgsz.value),
-                session_id: sessionId,
-                max_top: 5
-            })
-        });
-
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
-        }
-
-        const data = await res.json();
-        const latency = performance.now() - t0;
-
-        latencyEl.textContent = `${Math.round(latency)} ms`;
-        autoDelay = Math.min(650, Math.max(120, latency * 1.25));
-        delayEl.textContent = `${Math.round(autoDelay)} ms`;
-        topCountEl.textContent = data.top_count ?? 0;
-
-        lastBoxes = data.boxes || [];
-        drawBoxes(lastBoxes, data.frame_w, data.frame_h);
-
-        if (lastBoxes.length > 0) {
-            setStatus(`Đang detect: ${lastBoxes.length} bbox`);
-        } else {
-            setStatus("Đang detect: chưa thấy biển số");
-        }
-    } catch (e) {
-        setStatus("Lỗi detect");
-        console.error(e);
-    } finally {
-        busy = false;
-    }
-}
-
-function loop() {
-    if (running) {
-        detectOnce();
-        requestAnimationFrame(loop);
-    }
-}
-
 startBtn.addEventListener("click", async () => {
-    if (!video.src) {
-        alert("Hãy upload video trước.");
-        return;
-    }
+    if (!sessionId || !video.src) return;
 
-    resizeOverlay();
     running = true;
-    setStatus("Đang chạy");
+    busy = false;
 
-    try {
-        await video.play();
-        requestAnimationFrame(loop);
-    } catch (e) {
-        setStatus("Không phát được video");
-        console.error(e);
-    }
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    finishBtn.disabled = false;
+
+    statusText.textContent = "Đang phát video và detect realtime...";
+
+    await video.play();
+
+    requestAnimationFrame(detectLoop);
 });
 
 stopBtn.addEventListener("click", () => {
     running = false;
     video.pause();
-    setStatus("Đã dừng");
+
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    finishBtn.disabled = false;
+
+    statusText.textContent = "Đã dừng video.";
 });
 
-video.addEventListener("play", () => {
-    resizeOverlay();
-    if (running) requestAnimationFrame(loop);
-});
-
-video.addEventListener("pause", () => {
-    setStatus("Video pause");
-});
-
-video.addEventListener("seeked", () => {
-    lastBoxes = [];
-    clearOverlay();
-});
-
-video.addEventListener("ended", () => {
+finishBtn.addEventListener("click", async () => {
     running = false;
-    setStatus("Video kết thúc");
+    video.pause();
+
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    finishBtn.disabled = true;
+
+    await finishOcr();
 });
 
-window.addEventListener("resize", () => {
-    resizeOverlay();
+video.addEventListener("ended", async () => {
+    running = false;
+    stopBtn.disabled = true;
+    startBtn.disabled = false;
+    finishBtn.disabled = true;
+
+    await finishOcr();
 });
 
-ocrBtn.addEventListener("click", async () => {
-    setStatus("Đang OCR top crop...");
-    ocrResults.innerHTML = "";
+video.addEventListener("loadedmetadata", resizeOverlay);
+window.addEventListener("resize", resizeOverlay);
 
-    const res = await fetch("/ocr_top", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({session_id: sessionId})
-    });
-
-    const data = await res.json();
-    const rows = data.rows || [];
-
-    if (rows.length === 0) {
-        ocrResults.innerHTML = "<p>Không có bbox để OCR.</p>";
-        setStatus("Không có bbox OCR");
-        return;
-    }
-
-    rows.forEach(r => {
-        const card = document.createElement("div");
-        card.className = "ocr-card";
-
-        card.innerHTML = `
-            <img src="data:image/jpeg;base64,${r.image}" alt="crop">
-            <div class="plate-text">${r.text || "Không đọc được"}</div>
-            <div><b>Top ${r.rank}</b> | conf=${r.score}</div>
-            <div class="cands">${(r.cands || []).join(", ")}</div>
-        `;
-
-        ocrResults.appendChild(card);
-    });
-
-    setStatus("OCR xong");
-});
+requestAnimationFrame(drawBoxes);

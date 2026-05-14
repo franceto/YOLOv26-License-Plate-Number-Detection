@@ -1,257 +1,473 @@
-import sys, base64, uuid, hashlib
 from pathlib import Path
-from functools import lru_cache
-from typing import Dict, List
+import base64
+import re
+import threading
+import time
+import uuid
 
 import cv2
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from ultralytics import YOLO
+
+try:
+    from rapidocr_onnxruntime import RapidOCR
+except Exception:
+    RapidOCR = None
+
+try:
+    from streamlit_app.src.ocr_engine import recognize_plate, recognize_plate_fast
+except Exception:
+    recognize_plate = None
+    recognize_plate_fast = None
+
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(ROOT))
-from streamlit_app.src.ocr_engine import recognize_plate_fast
+STATIC_DIR = ROOT / "fastapi_app" / "static"
+MODEL_PATH = ROOT / "weights" / "yolo26_bienso_best.pt"
 
-WEIGHT_DIR = ROOT / "weights"
-MODEL_PATH = next(WEIGHT_DIR.glob("*best.pt"), None)
+app = FastAPI(title="YOLOv26 Realtime License Plate Demo")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-app = FastAPI(title="YOLOv26 License Plate FastAPI")
-app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+MODEL = None
+OCR_ENGINE = None
+MODEL_LOCK = threading.Lock()
+INFER_LOCK = threading.Lock()
+SESSIONS = {}
 
-TOPS: Dict[str, List[dict]] = {}
-OCR_CACHE = {}
-class FrameReq(BaseModel):
+TOP_K = 5
+
+
+class FrameRequest(BaseModel):
+    session_id: str
     image: str
-    conf: float = 0.35
-    imgsz: int = 512
-    session_id: str = "default"
-    max_top: int = 3
+    conf: float = 0.18
+    imgsz: int = 640
 
-class OcrReq(BaseModel):
-    session_id: str = "default"
 
-@lru_cache(maxsize=1)
-def load_model():
-    from ultralytics import YOLO
-    if MODEL_PATH is None:
-        raise FileNotFoundError(f"Không tìm thấy file *best.pt trong {WEIGHT_DIR}")
-    return YOLO(str(MODEL_PATH))
+class SessionRequest(BaseModel):
+    session_id: str
 
-@lru_cache(maxsize=1)
-def load_ocr():
-    from rapidocr_onnxruntime import RapidOCR
-    return RapidOCR()
 
-def decode_image(data_url):
-    data = data_url.split(",", 1)[1] if "," in data_url else data_url
-    arr = np.frombuffer(base64.b64decode(data), np.uint8)
-    return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+def get_model():
+    global MODEL
 
-def encode_jpg(img):
-    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-    return base64.b64encode(buf).decode() if ok else ""
+    with MODEL_LOCK:
+        if MODEL is None:
+            if not MODEL_PATH.exists():
+                raise RuntimeError(f"Không tìm thấy model: {MODEL_PATH}")
+            MODEL = YOLO(str(MODEL_PATH))
 
-def safe_crop(img, x1, y1, x2, y2, pad_ratio=0.08):
-    h, w = img.shape[:2]
-    pad = max(4, int(pad_ratio * max(x2 - x1, y2 - y1)))
-    x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
-    x2, y2 = min(w, x2 + pad), min(h, y2 + pad)
-    return img[y1:y2, x1:x2], (x1, y1, x2, y2)
+    return MODEL
 
-def crop_quality(item):
-    crop = item["crop"]
-    if crop is None or crop.size == 0:
-        return 0
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    sharp = cv2.Laplacian(gray, cv2.CV_64F).var()
-    bright = gray.mean()
-    h, w = crop.shape[:2]
-    area = h * w
-    bright_score = 100 - min(abs(bright - 125), 100)
-    return item["score"] * 100000 + min(sharp, 2500) * 12 + min(area, 60000) * 0.01 + bright_score * 20
-def box_iou(a, b):
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
 
-    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+def get_ocr():
+    global OCR_ENGINE
 
-    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
-    inter = iw * ih
+    if OCR_ENGINE is None:
+        if RapidOCR is None:
+            raise RuntimeError("Chưa cài rapidocr-onnxruntime")
+        OCR_ENGINE = RapidOCR()
 
-    area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
-    area_b = max(1, (bx2 - bx1) * (by2 - by1))
+    return OCR_ENGINE
 
-    return inter / (area_a + area_b - inter + 1e-6)
 
-def box_center_dist(a, b):
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
+def decode_base64_image(data_url):
+    if "," in data_url:
+        data_url = data_url.split(",", 1)[1]
 
-    acx, acy = (ax1 + ax2) / 2, (ay1 + ay2) / 2
-    bcx, bcy = (bx1 + bx2) / 2, (by1 + by2) / 2
+    raw = base64.b64decode(data_url)
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
-    return ((acx - bcx) ** 2 + (acy - bcy) ** 2) ** 0.5
-def update_top(session_id, items, max_top):
-    old = TOPS.get(session_id, [])
+    if img is None:
+        raise ValueError("Không decode được frame")
 
-    for item in items:
-        matched = -1
+    return img
 
-        for i, old_item in enumerate(old):
-            iou = box_iou(item["box"], old_item["box"])
-            dist = box_center_dist(item["box"], old_item["box"])
 
-            if iou > 0.35 or dist < 80:
-                matched = i
-                break
+def image_to_base64(img):
+    ok, buf = cv2.imencode(".jpg", img)
 
-        if matched >= 0:
-            if crop_quality(item) > crop_quality(old[matched]):
-                old[matched] = item
-        else:
-            old.append(item)
+    if not ok:
+        return ""
 
-    old = sorted(old, key=crop_quality, reverse=True)
-    TOPS[session_id] = old[:max_top]
-    old = TOPS.get(session_id, [])
-    all_items = old + items
-    all_items = sorted(all_items, key=crop_quality, reverse=True)
-    TOPS[session_id] = all_items[:max_top]
-def valid_plate_box(img, x1, y1, x2, y2, score):
-    h, w = img.shape[:2]
-    bw, bh = x2 - x1, y2 - y1
+    b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
+    return f"data:image/jpeg;base64,{b64}"
 
-    if bw <= 0 or bh <= 0:
+
+def clean_text(text):
+    if not text:
+        return ""
+
+    text = str(text).upper()
+    text = text.replace("\r", "\n")
+    text = re.sub(r"[ \t_]+", "", text)
+    text = text.replace("|", "1")
+    text = re.sub(r"[^A-Z0-9.\-\n]", "", text)
+
+    return text.strip()
+
+
+def plate_key(text):
+    text = clean_text(text)
+    text = text.replace("\n", "")
+    text = re.sub(r"[^A-Z0-9]", "", text)
+    return text
+
+
+def normalize_ocr_result(result):
+    if result is None:
+        return ""
+
+    if isinstance(result, str):
+        return clean_text(result)
+
+    if isinstance(result, dict):
+        for key in ["text", "plate", "best_text", "final_text", "result"]:
+            if result.get(key):
+                return clean_text(result[key])
+        return ""
+
+    if isinstance(result, tuple):
+        return normalize_ocr_result(result[0])
+
+    if isinstance(result, list):
+        texts = []
+
+        for item in result:
+            if isinstance(item, str):
+                texts.append(item)
+            elif isinstance(item, dict):
+                for key in ["text", "plate", "best_text"]:
+                    if item.get(key):
+                        texts.append(str(item[key]))
+                        break
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                if isinstance(item[1], str):
+                    texts.append(item[1])
+
+        return clean_text("".join(texts))
+
+    return clean_text(str(result))
+
+
+def run_ocr(img):
+    for fn in [recognize_plate, recognize_plate_fast]:
+        if fn is None:
+            continue
+
+        try:
+            return normalize_ocr_result(fn(img, get_ocr()))
+        except TypeError:
+            try:
+                return normalize_ocr_result(fn(img))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    try:
+        return normalize_ocr_result(get_ocr()(img))
+    except Exception:
+        return ""
+
+
+def valid_plate_box(box, w, h):
+    x1, y1, x2, y2 = box
+    bw = x2 - x1
+    bh = y2 - y1
+
+    if bw < 10 or bh < 8:
         return False
 
+    ratio = bw / max(bh, 1)
     area = bw * bh
-    ratio = bw / max(1, bh)
-    img_area = h * w
 
-    if score < 0.35:
-        return False
-    if area < img_area * 0.00015:
-        return False
-    if area > img_area * 0.08:
-        return False
-    if ratio < 0.35 or ratio > 6.5:
+    if ratio < 0.6 or ratio > 8.0:
         return False
 
-    crop = img[y1:y2, x1:x2]
-    if crop.size == 0:
+    if area < 120:
         return False
 
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-
-    if gray.mean() < 12:
-        return False
-    if gray.std() < 8:
+    if area / max(w * h, 1) < 0.000025:
         return False
 
     return True
-def crop_hash(img):
-    if img is None or img.size == 0:
-        return ""
-    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-    if not ok:
-        return ""
-    return hashlib.md5(buf.tobytes()).hexdigest()
 
-def ocr_cached(raw, crop, ocr):
-    key = crop_hash(crop)
 
-    if key in OCR_CACHE:
-        return OCR_CACHE[key]
+def clamp_box(box, w, h):
+    x1, y1, x2, y2 = map(float, box)
 
-    text, cands = recognize_plate_fast(raw, crop, ocr)
-    OCR_CACHE[key] = (text, cands)
+    x1 = max(0, min(w - 1, x1))
+    y1 = max(0, min(h - 1, y1))
+    x2 = max(0, min(w - 1, x2))
+    y2 = max(0, min(h - 1, y2))
 
-    if len(OCR_CACHE) > 300:
-        OCR_CACHE.clear()
+    return [int(x1), int(y1), int(x2), int(y2)]
 
-    return text, cands
-@app.get("/")
-def index():
-    return FileResponse(Path(__file__).parent / "static" / "index.html")
 
-@app.post("/reset")
-def reset(req: OcrReq):
-    TOPS.pop(req.session_id, None)
-    return {"ok": True}
+def crop_with_pad(frame, box, pad_ratio=0.12):
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = box
 
-@app.post("/detect_frame")
-def detect_frame(req: FrameReq):
-    img = decode_image(req.image)
-    if img is None:
-        return {"boxes": [], "frame_w": 0, "frame_h": 0, "error": "decode failed"}
+    bw = x2 - x1
+    bh = y2 - y1
 
-    model = load_model()
-    res = model(img, conf=req.conf, iou=0.45, imgsz=req.imgsz, verbose=False)[0]
+    px = int(bw * pad_ratio)
+    py = int(bh * pad_ratio)
 
-    boxes = []
-    crops = []
-    H, W = img.shape[:2]
+    x1 = max(0, x1 - px)
+    y1 = max(0, y1 - py)
+    x2 = min(w - 1, x2 + px)
+    y2 = min(h - 1, y2 + py)
 
-    for b in res.boxes:
-        x1, y1, x2, y2 = map(int, b.xyxy[0].tolist())
-        score = float(b.conf[0])
+    return frame[y1:y2, x1:x2].copy()
 
-        x1, y1, x2, y2 = max(0, x1), max(0, y1), min(W, x2), min(H, y2)
 
-        if not valid_plate_box(img, x1, y1, x2, y2, score):
+def crop_quality(crop, conf, box, frame_w, frame_h):
+    if crop is None or crop.size == 0:
+        return 0.0
+
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+
+    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+    brightness = float(gray.mean())
+
+    x1, y1, x2, y2 = box
+    area_ratio = ((x2 - x1) * (y2 - y1)) / max(frame_w * frame_h, 1)
+
+    sharp_score = min(sharpness / 420.0, 1.0)
+    bright_score = max(0.0, 1.0 - abs(brightness - 135.0) / 135.0)
+    area_score = min(area_ratio * 130.0, 1.0)
+
+    return 0.52 * float(conf) + 0.28 * sharp_score + 0.15 * bright_score + 0.05 * area_score
+
+
+def push_candidate(session_id, track_id, crop, quality, conf):
+    if session_id not in SESSIONS:
+        SESSIONS[session_id] = {}
+
+    tracks = SESSIONS[session_id]
+
+    if track_id not in tracks:
+        tracks[track_id] = {
+            "track_id": track_id,
+            "hits": 0,
+            "best_conf": 0.0,
+            "candidates": [],
+        }
+
+    t = tracks[track_id]
+    t["hits"] += 1
+    t["best_conf"] = max(t["best_conf"], float(conf))
+
+    t["candidates"].append(
+        {
+            "crop": crop,
+            "quality": quality,
+            "conf": float(conf),
+        }
+    )
+
+    t["candidates"] = sorted(
+        t["candidates"],
+        key=lambda x: x["quality"],
+        reverse=True,
+    )[:TOP_K]
+
+
+def choose_best_text(candidates):
+    votes = {}
+
+    for item in candidates:
+        crop = item["crop"]
+        quality = item["quality"]
+
+        text = run_ocr(crop)
+        key = plate_key(text)
+
+        if len(key) < 4:
             continue
 
-        raw = img[y1:y2, x1:x2]
-        crop, box = safe_crop(img, x1, y1, x2, y2, 0.08)
+        score = quality + min(len(key), 10) * 0.03
 
-        bx1, by1, bx2, by2 = box
+        if "\n" in text:
+            score += 0.08
 
-        boxes.append({
-            "x1": bx1,
-            "y1": by1,
-            "x2": bx2,
-            "y2": by2,
-            "score": round(score, 4),
-            "label": "Bien-so"
-        })
+        if key not in votes:
+            votes[key] = {
+                "text": text,
+                "score": 0.0,
+                "count": 0,
+                "crop": crop,
+                "quality": quality,
+            }
 
-        crops.append({
-            "crop": crop,
-            "raw": raw,
-            "score": score,
-            "box": [bx1, by1, bx2, by2]
-        })
+        votes[key]["score"] += score
+        votes[key]["count"] += 1
 
-    update_top(req.session_id, crops, req.max_top)
+        if quality > votes[key]["quality"]:
+            votes[key]["crop"] = crop
+            votes[key]["quality"] = quality
+            votes[key]["text"] = text
+
+    if not votes:
+        best = candidates[0]
+        return "", best["crop"], best["quality"]
+
+    best = max(votes.values(), key=lambda x: (x["count"], x["score"], x["quality"]))
+    return best["text"], best["crop"], best["quality"]
+
+
+@app.get("/")
+def home():
+    return FileResponse(str(STATIC_DIR / "index.html"))
+
+
+@app.get("/api/new_session")
+def new_session():
+    session_id = uuid.uuid4().hex[:12]
+    SESSIONS[session_id] = {}
+
+    try:
+        model = get_model()
+        model.predictor = None
+    except Exception:
+        pass
+
+    return {"session_id": session_id}
+
+
+@app.post("/api/reset")
+def reset(req: SessionRequest):
+    SESSIONS[req.session_id] = {}
+
+    try:
+        model = get_model()
+        model.predictor = None
+    except Exception:
+        pass
+
+    return {"ok": True}
+
+
+@app.post("/api/detect_frame")
+def detect_frame(req: FrameRequest):
+    frame = decode_base64_image(req.image)
+    h, w = frame.shape[:2]
+
+    model = get_model()
+
+    with INFER_LOCK:
+        try:
+            results = model.track(
+                frame,
+                persist=True,
+                tracker="bytetrack.yaml",
+                conf=req.conf,
+                imgsz=req.imgsz,
+                verbose=False,
+            )
+        except Exception:
+            results = model.predict(
+                frame,
+                conf=req.conf,
+                imgsz=req.imgsz,
+                verbose=False,
+            )
+
+    boxes_out = []
+
+    if results and len(results) > 0 and results[0].boxes is not None:
+        boxes = results[0].boxes
+
+        xyxy = boxes.xyxy.cpu().numpy()
+        confs = boxes.conf.cpu().numpy() if boxes.conf is not None else np.ones(len(xyxy))
+
+        if boxes.id is not None:
+            ids = boxes.id.cpu().numpy().astype(int)
+        else:
+            ids = np.arange(1, len(xyxy) + 1)
+
+        for box_raw, conf, track_id in zip(xyxy, confs, ids):
+            box = clamp_box(box_raw, w, h)
+
+            if not valid_plate_box(box, w, h):
+                continue
+
+            crop = crop_with_pad(frame, box)
+            quality = crop_quality(crop, conf, box, w, h)
+
+            push_candidate(
+                req.session_id,
+                int(track_id),
+                crop,
+                quality,
+                conf,
+            )
+
+            boxes_out.append(
+                {
+                    "track_id": int(track_id),
+                    "conf": round(float(conf), 4),
+                    "box": box,
+                }
+            )
 
     return {
-        "boxes": boxes,
-        "frame_w": W,
-        "frame_h": H,
-        "top_count": len(TOPS.get(req.session_id, []))
+        "frame_w": w,
+        "frame_h": h,
+        "boxes": boxes_out,
+        "total_tracks": len(SESSIONS.get(req.session_id, {})),
+        "time": time.time(),
     }
 
-@app.post("/ocr_top")
-def ocr_top(req: OcrReq):
-    ocr = load_ocr()
-    items = TOPS.get(req.session_id, [])
-    rows = []
 
-    for i, item in enumerate(items):
-        text, cands = ocr_cached(item["raw"], item["crop"], ocr)
-        rows.append({
-            "rank": i + 1,
-            "score": round(float(item["score"]), 4),
-            "text": text,
-            "cands": cands,
-            "image": encode_jpg(item["crop"])
-        })
+@app.post("/api/ocr_best")
+def ocr_best(req: SessionRequest):
+    if req.session_id not in SESSIONS:
+        raise HTTPException(status_code=404, detail="Không tìm thấy session")
 
-    return {"rows": rows}
+    records = []
+    seen = set()
 
-@app.get("/new_session")
-def new_session():
-    return {"session_id": str(uuid.uuid4())}
+    tracks = SESSIONS[req.session_id]
+
+    for track_id, t in tracks.items():
+        candidates = t["candidates"]
+
+        if not candidates:
+            continue
+
+        text, crop, quality = choose_best_text(candidates)
+        key = plate_key(text)
+
+        if len(key) < 4:
+            continue
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        records.append(
+            {
+                "track_id": int(track_id),
+                "text": text,
+                "image": image_to_base64(crop),
+                "hits": int(t["hits"]),
+                "conf": round(float(t["best_conf"]), 4),
+                "quality": round(float(quality), 4),
+            }
+        )
+
+    records = sorted(records, key=lambda x: x["quality"], reverse=True)
+
+    return {
+        "total": len(records),
+        "results": records,
+    }
